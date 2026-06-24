@@ -11,14 +11,15 @@ use Smalot\PdfParser\Parser;
 
 class RagController extends Controller
 {
-    private const CACHE_KEY      = 'rag:store';
-    private const EMBED_MODEL    = 'text-embedding-3-small';
-    private const CHAT_MODEL     = 'gpt-4o-mini';
-    private const CHUNK_WORDS    = 300;
-    private const CHUNK_OVERLAP  = 50;
-    private const TOP_K          = 4;
-    private const MAX_ATTEMPTS   = 4;
-    private const EMBED_BATCH    = 20;
+    private const CACHE_KEY          = 'rag:store';
+    private const EMBED_MODEL        = 'text-embedding-3-small';
+    private const CHAT_MODEL         = 'gpt-4o-mini';
+    private const CHUNK_WORDS        = 600;   // larger chunks → fewer total API calls
+    private const CHUNK_OVERLAP      = 60;
+    private const TOP_K              = 3;
+    private const MAX_ATTEMPTS       = 5;
+    private const EMBED_BATCH        = 20;
+    private const FREE_TIER_DELAY    = 21;    // seconds between API calls (3 RPM = 1 per 20 s)
 
     public function upload(Request $request): JsonResponse
     {
@@ -120,7 +121,7 @@ class RagController extends Controller
 
         foreach ($batches as $batchIndex => $batch) {
             if ($batchIndex > 0) {
-                sleep(1);
+                sleep(self::FREE_TIER_DELAY);
             }
 
             $response = $this->withRetry(fn () => OpenAI::embeddings()->create([
@@ -152,7 +153,7 @@ class RagController extends Controller
                 }
 
                 $retryAfter = (int) ($e->response->getHeaderLine('retry-after') ?: 0);
-                $wait       = $retryAfter > 0 ? $retryAfter : (int) pow(2, $attempt + 2);
+                $wait       = max($retryAfter, self::FREE_TIER_DELAY);
 
                 sleep(min($wait, 60));
             }

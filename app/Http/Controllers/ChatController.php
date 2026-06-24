@@ -10,9 +10,10 @@ use OpenAI\Laravel\Facades\OpenAI;
 
 class ChatController extends Controller
 {
-    private const CHAT_MODEL   = 'gpt-4o-mini';
-    private const TTL          = 120;
-    private const MAX_ATTEMPTS = 3;
+    private const CHAT_MODEL      = 'gpt-4o-mini';
+    private const TTL             = 120;
+    private const MAX_ATTEMPTS    = 5;
+    private const FREE_TIER_DELAY = 21;
 
     private const PRESET_CONTEXTS = [
         'color' => 'My favorite color is red.',
@@ -69,6 +70,8 @@ class ChatController extends Controller
                         'content'      => $color,
                     ];
                 }
+
+                sleep(self::FREE_TIER_DELAY);
 
                 $response = $this->withRetry(fn () => OpenAI::chat()->create([
                     'model'    => self::CHAT_MODEL,
@@ -134,7 +137,7 @@ class ChatController extends Controller
                 }
 
                 $retryAfter = (int) ($e->response->getHeaderLine('retry-after') ?: 0);
-                $wait       = $retryAfter > 0 ? $retryAfter : (int) pow(2, $attempt + 2);
+                $wait       = max($retryAfter, self::FREE_TIER_DELAY);
 
                 sleep(min($wait, 60));
             }

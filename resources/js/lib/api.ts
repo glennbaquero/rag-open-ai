@@ -20,6 +20,7 @@ export async function apiPost<T>(url: string, body: Record<string, unknown>): Pr
             'Content-Type': 'application/json',
             'Accept': 'application/json',
         },
+        signal: AbortSignal.timeout(300_000), // 5 min — free tier retries take time
         body: JSON.stringify(body),
     });
 
@@ -31,6 +32,7 @@ export async function apiUpload<T>(url: string, formData: FormData): Promise<T> 
     const res = await fetch(url, {
         method: 'POST',
         headers: { 'Accept': 'application/json' },
+        signal: AbortSignal.timeout(300_000),
         body: formData,
     });
 
