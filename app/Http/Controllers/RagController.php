@@ -183,11 +183,25 @@ class RagController extends Controller
 
     private function rateLimitMessage(RateLimitException $e): string
     {
+        try {
+            $body    = json_decode((string) $e->response->getBody(), true);
+            $message = $body['error']['message'] ?? '';
+            $code    = $body['error']['code']    ?? '';
+
+            if ($code === 'insufficient_quota' || str_contains($message, 'quota')) {
+                return 'Your OpenAI free credits have expired. Add a payment method at platform.openai.com/settings/billing to continue.';
+            }
+
+            if ($message) {
+                return "OpenAI: {$message}";
+            }
+        } catch (\Throwable) {}
+
         $retryAfter = (int) ($e->response->getHeaderLine('retry-after') ?: 0);
 
         return $retryAfter > 0
-            ? "OpenAI rate limit reached. Please try again in {$retryAfter} seconds."
-            : 'OpenAI rate limit reached. Please wait a moment and try again.';
+            ? "Rate limit reached. Please try again in {$retryAfter} seconds."
+            : 'Rate limit reached. Please wait a moment and try again.';
     }
 
     private function chunkText(string $text): array

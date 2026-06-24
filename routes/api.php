@@ -1,8 +1,11 @@
 <?php
 
 use App\Http\Controllers\ChatController;
+use App\Http\Controllers\DiagnosticController;
 use App\Http\Controllers\RagController;
 use Illuminate\Support\Facades\Route;
+
+Route::get('/health', [DiagnosticController::class, 'testConnection']);
 
 // Assignment 1 — RAG AI Agent
 Route::post('/rag/upload', [RagController::class, 'upload'])->name('rag.upload');
