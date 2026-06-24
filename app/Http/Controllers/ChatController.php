@@ -5,22 +5,20 @@ namespace App\Http\Controllers;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
-use Inertia\Inertia;
-use Inertia\Response;
+use OpenAI\Exceptions\RateLimitException;
 use OpenAI\Laravel\Facades\OpenAI;
 
 class ChatController extends Controller
 {
-    private const CHAT_MODEL = 'gpt-4o-mini';
-    private const TTL        = 120; // minutes
+    private const CHAT_MODEL   = 'gpt-4o-mini';
+    private const TTL          = 120;
+    private const MAX_ATTEMPTS = 3;
 
-    /** @var array<string,string> */
     private const PRESET_CONTEXTS = [
         'color' => 'My favorite color is red.',
         'food'  => 'My favorite food is green apples because I love green.',
     ];
 
-    /** Tool definition sent to the LLM on every turn. */
     private const TOOLS = [
         [
             'type'     => 'function',
@@ -48,45 +46,54 @@ class ChatController extends Controller
         $systemMessages = [['role' => 'system', 'content' => $session['context']]];
         $allMessages    = array_merge($systemMessages, $session['history']);
 
-        $response     = OpenAI::chat()->create([
-            'model'       => self::CHAT_MODEL,
-            'messages'    => $allMessages,
-            'tools'       => self::TOOLS,
-            'tool_choice' => 'auto',
-        ]);
+        try {
+            $response = $this->withRetry(fn () => OpenAI::chat()->create([
+                'model'       => self::CHAT_MODEL,
+                'messages'    => $allMessages,
+                'tools'       => self::TOOLS,
+                'tool_choice' => 'auto',
+            ]));
 
-        $assistantMsg = $response->choices[0]->message;
-        $toolOutput   = null;
+            $assistantMsg = $response->choices[0]->message;
+            $toolOutput   = null;
 
-        $session['history'][] = $assistantMsg->toArray();
+            $session['history'][] = $assistantMsg->toArray();
 
-        if (! empty($assistantMsg->toolCalls)) {
-            foreach ($assistantMsg->toolCalls as $toolCall) {
-                $color                = $this->extractColor($session['context']);
-                $toolOutput           = $color;
-                $session['history'][] = [
-                    'role'         => 'tool',
-                    'tool_call_id' => $toolCall->id,
-                    'content'      => $color,
-                ];
+            if (! empty($assistantMsg->toolCalls)) {
+                foreach ($assistantMsg->toolCalls as $toolCall) {
+                    $color                = $this->extractColor($session['context']);
+                    $toolOutput           = $color;
+                    $session['history'][] = [
+                        'role'         => 'tool',
+                        'tool_call_id' => $toolCall->id,
+                        'content'      => $color,
+                    ];
+                }
+
+                $response = $this->withRetry(fn () => OpenAI::chat()->create([
+                    'model'    => self::CHAT_MODEL,
+                    'messages' => array_merge($systemMessages, $session['history']),
+                ]));
+                $assistantMsg         = $response->choices[0]->message;
+                $session['history'][] = $assistantMsg->toArray();
             }
 
-            $response     = OpenAI::chat()->create([
-                'model'    => self::CHAT_MODEL,
-                'messages' => array_merge($systemMessages, $session['history']),
+            $this->saveSession($sessionId, $session);
+
+            return response()->json([
+                'reply'      => $assistantMsg->content,
+                'toolOutput' => $toolOutput,
+                'context'    => $session['context'],
+                'history'    => $this->buildDisplayHistory($session['history']),
             ]);
-            $assistantMsg = $response->choices[0]->message;
-            $session['history'][] = $assistantMsg->toArray();
+
+        } catch (RateLimitException) {
+            return response()->json([
+                'error' => 'OpenAI rate limit reached. Please wait a moment and try again.',
+            ], 429);
+        } catch (\Throwable $e) {
+            return response()->json(['error' => $e->getMessage()], 500);
         }
-
-        $this->saveSession($sessionId, $session);
-
-        return response()->json([
-            'reply'      => $assistantMsg->content,
-            'toolOutput' => $toolOutput,
-            'context'    => $session['context'],
-            'history'    => $this->buildDisplayHistory($session['history']),
-        ]);
     }
 
     public function switchContext(Request $request): JsonResponse
@@ -116,9 +123,22 @@ class ChatController extends Controller
         return response()->json(['success' => true]);
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    private function withRetry(callable $fn): mixed
+    {
+        $attempt = 0;
 
-    /** @return array{history: array<int,array<string,mixed>>, context: string} */
+        while (true) {
+            try {
+                return $fn();
+            } catch (RateLimitException $e) {
+                if (++$attempt >= self::MAX_ATTEMPTS) {
+                    throw $e;
+                }
+                usleep((int) pow(2, $attempt) * 1_000_000);
+            }
+        }
+    }
+
     private function loadSession(string $id): array
     {
         return Cache::get("chat:{$id}", [
@@ -127,7 +147,6 @@ class ChatController extends Controller
         ]);
     }
 
-    /** @param array{history: array<int,array<string,mixed>>, context: string} $session */
     private function saveSession(string $id, array $session): void
     {
         Cache::put("chat:{$id}", $session, now()->addMinutes(self::TTL));
@@ -147,12 +166,6 @@ class ChatController extends Controller
         return 'Unknown';
     }
 
-    /**
-     * Strip raw tool messages so the UI only receives user/assistant turns.
-     *
-     * @param  array<int,array<string,mixed>>  $history
-     * @return array<int,array{role:string,content:string}>
-     */
     private function buildDisplayHistory(array $history): array
     {
         $display = [];

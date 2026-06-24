@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Head, Link } from '@inertiajs/vue3';
 import { nextTick, ref } from 'vue';
-import { apiDelete, apiPost } from '@/lib/api';
+import { ApiError, apiDelete, apiPost } from '@/lib/api';
 
 interface Message {
     role: 'user' | 'assistant';
@@ -61,7 +61,10 @@ async function send() {
         history.value        = serverHistory;
         currentContext.value = data.context;
     } catch (e) {
-        history.value.push({ role: 'assistant', content: `⚠ Error: ${(e as Error).message}` });
+        const msg = e instanceof ApiError && e.status === 429
+            ? '⏳ Rate limit reached — please wait a moment and try again.'
+            : (e as Error).message;
+        history.value.push({ role: 'assistant', content: `⚠ ${msg}` });
     } finally {
         loading.value = false;
         await scrollBottom();

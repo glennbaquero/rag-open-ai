@@ -1,3 +1,18 @@
+export class ApiError extends Error {
+    constructor(message: string, public readonly status: number) {
+        super(message);
+    }
+}
+
+async function parseError(res: Response): Promise<ApiError> {
+    try {
+        const body = await res.json() as { error?: string };
+        return new ApiError(body.error ?? `HTTP ${res.status}`, res.status);
+    } catch {
+        return new ApiError(`HTTP ${res.status}`, res.status);
+    }
+}
+
 export async function apiPost<T>(url: string, body: Record<string, unknown>): Promise<T> {
     const res = await fetch(url, {
         method: 'POST',
@@ -8,30 +23,24 @@ export async function apiPost<T>(url: string, body: Record<string, unknown>): Pr
         body: JSON.stringify(body),
     });
 
-    const data = await res.json() as T & { error?: string };
-    if (!res.ok) throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`);
-    return data;
+    if (!res.ok) throw await parseError(res);
+    return res.json() as Promise<T>;
 }
 
 export async function apiUpload<T>(url: string, formData: FormData): Promise<T> {
     const res = await fetch(url, {
         method: 'POST',
-        headers: {
-            'Accept': 'application/json',
-        },
+        headers: { 'Accept': 'application/json' },
         body: formData,
     });
 
-    const data = await res.json() as T & { error?: string };
-    if (!res.ok) throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`);
-    return data;
+    if (!res.ok) throw await parseError(res);
+    return res.json() as Promise<T>;
 }
 
 export async function apiDelete(url: string): Promise<void> {
     await fetch(url, {
         method: 'DELETE',
-        headers: {
-            'Accept': 'application/json',
-        },
+        headers: { 'Accept': 'application/json' },
     });
 }

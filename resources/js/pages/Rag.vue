@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Head, Link } from '@inertiajs/vue3';
 import { ref } from 'vue';
-import { apiPost, apiUpload } from '@/lib/api';
+import { ApiError, apiPost, apiUpload } from '@/lib/api';
 
 interface Source {
     preview: string;
@@ -60,7 +60,10 @@ async function uploadPdf() {
         ready.value  = true;
         status.value = { ok: true, msg: `✓ ${data.chunks} chunks embedded` };
     } catch (e) {
-        status.value = { ok: false, msg: (e as Error).message };
+        const msg = e instanceof ApiError && e.status === 429
+            ? '⏳ Rate limit reached — please wait a moment and try again.'
+            : (e as Error).message;
+        status.value = { ok: false, msg };
     } finally {
         uploading.value = false;
     }
@@ -78,7 +81,9 @@ async function runQuery() {
         answer.value  = data.answer;
         sources.value = data.sources;
     } catch (e) {
-        error.value = (e as Error).message;
+        error.value = e instanceof ApiError && e.status === 429
+            ? '⏳ Rate limit reached — please wait a moment and try again.'
+            : (e as Error).message;
     } finally {
         querying.value = false;
     }
