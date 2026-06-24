@@ -87,10 +87,8 @@ class ChatController extends Controller
                 'history'    => $this->buildDisplayHistory($session['history']),
             ]);
 
-        } catch (RateLimitException) {
-            return response()->json([
-                'error' => 'OpenAI rate limit reached. Please wait a moment and try again.',
-            ], 429);
+        } catch (RateLimitException $e) {
+            return response()->json(['error' => $this->rateLimitMessage($e)], 429);
         } catch (\Throwable $e) {
             return response()->json(['error' => $e->getMessage()], 500);
         }
@@ -134,9 +132,22 @@ class ChatController extends Controller
                 if (++$attempt >= self::MAX_ATTEMPTS) {
                     throw $e;
                 }
-                usleep((int) pow(2, $attempt) * 1_000_000);
+
+                $retryAfter = (int) ($e->response->getHeaderLine('retry-after') ?: 0);
+                $wait       = $retryAfter > 0 ? $retryAfter : (int) pow(2, $attempt + 2);
+
+                sleep(min($wait, 60));
             }
         }
+    }
+
+    private function rateLimitMessage(RateLimitException $e): string
+    {
+        $retryAfter = (int) ($e->response->getHeaderLine('retry-after') ?: 0);
+
+        return $retryAfter > 0
+            ? "OpenAI rate limit reached. Please try again in {$retryAfter} seconds."
+            : 'OpenAI rate limit reached. Please wait a moment and try again.';
     }
 
     private function loadSession(string $id): array

@@ -17,7 +17,8 @@ class RagController extends Controller
     private const CHUNK_WORDS    = 300;
     private const CHUNK_OVERLAP  = 50;
     private const TOP_K          = 4;
-    private const MAX_ATTEMPTS   = 3;
+    private const MAX_ATTEMPTS   = 4;
+    private const EMBED_BATCH    = 20;
 
     public function upload(Request $request): JsonResponse
     {
@@ -33,24 +34,15 @@ class RagController extends Controller
             }
 
             $chunks = $this->chunkText($text);
-
-            $response = $this->withRetry(fn () => OpenAI::embeddings()->create([
-                'model' => self::EMBED_MODEL,
-                'input' => $chunks,
-            ]));
-
-            $store = array_map(fn ($chunk, int $i) => [
-                'text'      => $chunk,
-                'embedding' => $response->embeddings[$i]->embedding,
-            ], $chunks, array_keys($chunks));
+            $store  = $this->embedChunks($chunks);
 
             Cache::store('file')->put(self::CACHE_KEY, $store, now()->addHours(6));
 
             return response()->json(['success' => true, 'chunks' => count($chunks)]);
 
-        } catch (RateLimitException) {
+        } catch (RateLimitException $e) {
             return response()->json([
-                'error' => 'OpenAI rate limit reached. Please wait a moment and try again.',
+                'error' => $this->rateLimitMessage($e),
             ], 429);
         } catch (\Throwable $e) {
             return response()->json(['error' => $e->getMessage()], 500);
@@ -106,13 +98,45 @@ class RagController extends Controller
                 ])->values(),
             ]);
 
-        } catch (RateLimitException) {
-            return response()->json([
-                'error' => 'OpenAI rate limit reached. Please wait a moment and try again.',
-            ], 429);
+        } catch (RateLimitException $e) {
+            return response()->json(['error' => $this->rateLimitMessage($e)], 429);
         } catch (\Throwable $e) {
             return response()->json(['error' => $e->getMessage()], 500);
         }
+    }
+
+    /**
+     * Embed chunks in small batches so we stay within the tokens-per-minute
+     * limit on low-tier OpenAI accounts. A 1-second pause between batches
+     * keeps the request rate well below the default 60 RPM ceiling.
+     *
+     * @param  array<int,string>  $chunks
+     * @return array<int,array{text:string,embedding:array<int,float>}>
+     */
+    private function embedChunks(array $chunks): array
+    {
+        $store   = [];
+        $batches = array_chunk($chunks, self::EMBED_BATCH);
+
+        foreach ($batches as $batchIndex => $batch) {
+            if ($batchIndex > 0) {
+                sleep(1);
+            }
+
+            $response = $this->withRetry(fn () => OpenAI::embeddings()->create([
+                'model' => self::EMBED_MODEL,
+                'input' => $batch,
+            ]));
+
+            foreach ($response->embeddings as $i => $embedding) {
+                $store[] = [
+                    'text'      => $batch[$i],
+                    'embedding' => $embedding->embedding,
+                ];
+            }
+        }
+
+        return $store;
     }
 
     private function withRetry(callable $fn): mixed
@@ -126,9 +150,22 @@ class RagController extends Controller
                 if (++$attempt >= self::MAX_ATTEMPTS) {
                     throw $e;
                 }
-                usleep((int) pow(2, $attempt) * 1_000_000);
+
+                $retryAfter = (int) ($e->response->getHeaderLine('retry-after') ?: 0);
+                $wait       = $retryAfter > 0 ? $retryAfter : (int) pow(2, $attempt + 2);
+
+                sleep(min($wait, 60));
             }
         }
+    }
+
+    private function rateLimitMessage(RateLimitException $e): string
+    {
+        $retryAfter = (int) ($e->response->getHeaderLine('retry-after') ?: 0);
+
+        return $retryAfter > 0
+            ? "OpenAI rate limit reached. Please try again in {$retryAfter} seconds."
+            : 'OpenAI rate limit reached. Please wait a moment and try again.';
     }
 
     private function cosineSimilarity(array $a, array $b): float
