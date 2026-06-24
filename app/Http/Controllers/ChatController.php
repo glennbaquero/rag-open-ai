@@ -34,6 +34,7 @@ class ChatController extends Controller
 
     public function message(Request $request): JsonResponse
     {
+        set_time_limit(300);
         $request->validate([
             'session_id' => 'required|string|uuid',
             'message'    => 'required|string|max:2000',

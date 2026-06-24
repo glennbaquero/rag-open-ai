@@ -23,6 +23,7 @@ class RagController extends Controller
 
     public function upload(Request $request): JsonResponse
     {
+        set_time_limit(300);
         $request->validate(['pdf' => 'required|file|mimes:pdf|max:20480']);
 
         try {
@@ -52,6 +53,7 @@ class RagController extends Controller
 
     public function query(Request $request): JsonResponse
     {
+        set_time_limit(300);
         $request->validate(['query' => 'required|string|max:1000']);
 
         $store = Cache::store('file')->get(self::CACHE_KEY);
