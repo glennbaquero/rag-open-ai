@@ -72,8 +72,6 @@ class ChatController extends Controller
                     ];
                 }
 
-                sleep(self::FREE_TIER_DELAY);
-
                 $response = $this->withRetry(fn () => OpenAI::chat()->create([
                     'model'    => self::CHAT_MODEL,
                     'messages' => array_merge($systemMessages, $session['history']),

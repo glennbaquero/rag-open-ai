@@ -11,19 +11,20 @@ use Smalot\PdfParser\Parser;
 
 class RagController extends Controller
 {
-    private const CACHE_KEY          = 'rag:store';
-    private const EMBED_MODEL        = 'text-embedding-3-small';
-    private const CHAT_MODEL         = 'gpt-4o-mini';
-    private const CHUNK_WORDS        = 600;   // larger chunks → fewer total API calls
-    private const CHUNK_OVERLAP      = 60;
-    private const TOP_K              = 3;
-    private const MAX_ATTEMPTS       = 5;
-    private const EMBED_BATCH        = 20;
-    private const FREE_TIER_DELAY    = 21;    // seconds between API calls (3 RPM = 1 per 20 s)
+    private const CACHE_KEY    = 'rag:chunks';
+    private const CHAT_MODEL   = 'gpt-4o-mini';
+    private const CHUNK_WORDS  = 400;
+    private const CHUNK_OVERLAP= 40;
+    private const TOP_K        = 3;
+    private const MAX_ATTEMPTS = 5;
+    private const FREE_TIER_DELAY = 21;
 
+    /**
+     * Parse the PDF and cache the plain-text chunks.
+     * No OpenAI API call needed — TF-IDF handles retrieval locally.
+     */
     public function upload(Request $request): JsonResponse
     {
-        set_time_limit(300);
         $request->validate(['pdf' => 'required|file|mimes:pdf|max:20480']);
 
         try {
@@ -36,48 +37,35 @@ class RagController extends Controller
             }
 
             $chunks = $this->chunkText($text);
-            $store  = $this->embedChunks($chunks);
 
-            Cache::store('file')->put(self::CACHE_KEY, $store, now()->addHours(6));
+            Cache::store('file')->put(self::CACHE_KEY, $chunks, now()->addHours(6));
 
             return response()->json(['success' => true, 'chunks' => count($chunks)]);
 
-        } catch (RateLimitException $e) {
-            return response()->json([
-                'error' => $this->rateLimitMessage($e),
-            ], 429);
         } catch (\Throwable $e) {
             return response()->json(['error' => $e->getMessage()], 500);
         }
     }
 
+    /**
+     * Rank chunks with local TF-IDF (no API call), then send the top chunks
+     * as context to gpt-4o-mini — one API call total per query.
+     */
     public function query(Request $request): JsonResponse
     {
         set_time_limit(300);
         $request->validate(['query' => 'required|string|max:1000']);
 
-        $store = Cache::store('file')->get(self::CACHE_KEY);
+        $chunks = Cache::store('file')->get(self::CACHE_KEY);
 
-        if (! $store) {
+        if (! $chunks) {
             return response()->json(['error' => 'No PDF loaded. Please upload a PDF first.'], 422);
         }
 
         try {
-            $queryEmbed = $this->withRetry(fn () => OpenAI::embeddings()->create([
-                'model' => self::EMBED_MODEL,
-                'input' => [$request->string('query')->toString()],
-            ]));
-            $queryVec = $queryEmbed->embeddings[0]->embedding;
-
-            $topChunks = collect($store)
-                ->map(fn ($chunk) => array_merge($chunk, [
-                    'score' => $this->cosineSimilarity($queryVec, $chunk['embedding']),
-                ]))
-                ->sortByDesc('score')
-                ->take(self::TOP_K)
-                ->values();
-
-            $context = $topChunks
+            $query     = $request->string('query')->toString();
+            $topChunks = $this->retrieve($query, $chunks);
+            $context   = collect($topChunks)
                 ->map(fn ($c, int $i) => '[Chunk '.($i + 1)."]\n{$c['text']}")
                 ->implode("\n\n");
 
@@ -87,18 +75,18 @@ class RagController extends Controller
                     [
                         'role'    => 'system',
                         'content' => "Answer the user's question using only the retrieved context below. "
-                                   . "If the answer is not present in the context, say so clearly.\n\n---\n{$context}",
+                                   . "If the answer is not in the context, say so clearly.\n\n---\n{$context}",
                     ],
-                    ['role' => 'user', 'content' => $request->string('query')->toString()],
+                    ['role' => 'user', 'content' => $query],
                 ],
             ]));
 
             return response()->json([
                 'answer'  => $completion->choices[0]->message->content,
-                'sources' => $topChunks->map(fn ($c) => [
+                'sources' => array_map(fn ($c) => [
                     'preview' => mb_substr($c['text'], 0, 130).'…',
                     'score'   => round($c['score'], 3),
-                ])->values(),
+                ], $topChunks),
             ]);
 
         } catch (RateLimitException $e) {
@@ -108,39 +96,73 @@ class RagController extends Controller
         }
     }
 
-    /**
-     * Embed chunks in small batches so we stay within the tokens-per-minute
-     * limit on low-tier OpenAI accounts. A 1-second pause between batches
-     * keeps the request rate well below the default 60 RPM ceiling.
-     *
-     * @param  array<int,string>  $chunks
-     * @return array<int,array{text:string,embedding:array<int,float>}>
-     */
-    private function embedChunks(array $chunks): array
-    {
-        $store   = [];
-        $batches = array_chunk($chunks, self::EMBED_BATCH);
+    // ── Retrieval (local TF-IDF, no API) ─────────────────────────────────────
 
-        foreach ($batches as $batchIndex => $batch) {
-            if ($batchIndex > 0) {
-                sleep(self::FREE_TIER_DELAY);
+    /**
+     * @param  array<int,string>  $chunks
+     * @return array<int,array{text:string,score:float}>
+     */
+    private function retrieve(string $query, array $chunks): array
+    {
+        $queryTerms = $this->tokenize($query);
+        $idf        = $this->idf($chunks);
+
+        $scored = array_map(function (string $chunk) use ($queryTerms, $idf) {
+            $chunkTerms = array_count_values($this->tokenize($chunk));
+            $chunkLen   = max(array_sum($chunkTerms), 1);
+            $score      = 0.0;
+
+            foreach ($queryTerms as $term) {
+                if (isset($chunkTerms[$term])) {
+                    $tf     = $chunkTerms[$term] / $chunkLen;
+                    $score += $tf * ($idf[$term] ?? 0.0);
+                }
             }
 
-            $response = $this->withRetry(fn () => OpenAI::embeddings()->create([
-                'model' => self::EMBED_MODEL,
-                'input' => $batch,
-            ]));
+            return ['text' => $chunk, 'score' => $score];
+        }, $chunks);
 
-            foreach ($response->embeddings as $i => $embedding) {
-                $store[] = [
-                    'text'      => $batch[$i],
-                    'embedding' => $embedding->embedding,
-                ];
+        usort($scored, fn ($a, $b) => $b['score'] <=> $a['score']);
+
+        return array_slice($scored, 0, self::TOP_K);
+    }
+
+    /** @param array<int,string> $chunks */
+    private function idf(array $chunks): array
+    {
+        $n      = count($chunks);
+        $df     = [];
+
+        foreach ($chunks as $chunk) {
+            foreach (array_unique($this->tokenize($chunk)) as $term) {
+                $df[$term] = ($df[$term] ?? 0) + 1;
             }
         }
 
-        return $store;
+        $idf = [];
+        foreach ($df as $term => $freq) {
+            $idf[$term] = log(($n + 1) / ($freq + 1)) + 1;
+        }
+
+        return $idf;
     }
+
+    /** @return array<int,string> */
+    private function tokenize(string $text): array
+    {
+        $text  = strtolower($text);
+        $text  = preg_replace('/[^a-z0-9\s]/', ' ', $text);
+        $words = preg_split('/\s+/', trim($text), -1, PREG_SPLIT_NO_EMPTY);
+
+        $stopwords = ['the','a','an','and','or','but','in','on','at','to','for',
+                      'of','with','by','from','is','it','this','that','was','are'];
+
+        return array_values(array_filter($words,
+            fn ($w) => strlen($w) > 2 && ! in_array($w, $stopwords, true)
+        ));
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private function withRetry(callable $fn): mixed
     {
@@ -153,11 +175,8 @@ class RagController extends Controller
                 if (++$attempt >= self::MAX_ATTEMPTS) {
                     throw $e;
                 }
-
                 $retryAfter = (int) ($e->response->getHeaderLine('retry-after') ?: 0);
-                $wait       = max($retryAfter, self::FREE_TIER_DELAY);
-
-                sleep(min($wait, 60));
+                sleep(min(max($retryAfter, self::FREE_TIER_DELAY), 60));
             }
         }
     }
@@ -169,23 +188,6 @@ class RagController extends Controller
         return $retryAfter > 0
             ? "OpenAI rate limit reached. Please try again in {$retryAfter} seconds."
             : 'OpenAI rate limit reached. Please wait a moment and try again.';
-    }
-
-    private function cosineSimilarity(array $a, array $b): float
-    {
-        $dot  = 0.0;
-        $magA = 0.0;
-        $magB = 0.0;
-
-        foreach ($a as $i => $val) {
-            $dot  += $val * $b[$i];
-            $magA += $val * $val;
-            $magB += $b[$i] * $b[$i];
-        }
-
-        $denom = sqrt($magA) * sqrt($magB);
-
-        return $denom > 0.0 ? $dot / $denom : 0.0;
     }
 
     private function chunkText(string $text): array
