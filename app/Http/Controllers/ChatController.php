@@ -116,7 +116,7 @@ class ChatController extends Controller
         return response()->json(['success' => true, 'context' => $session['context']]);
     }
 
-    public function clearSession(Request $request, string $sessionId): JsonResponse
+    public function clearSession(string $sessionId): JsonResponse
     {
         Cache::forget("chat:{$sessionId}");
 

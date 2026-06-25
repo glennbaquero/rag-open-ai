@@ -58,7 +58,7 @@ async function uploadPdf() {
     try {
         const data = await apiUpload<UploadResponse>('/api/rag/upload', fd);
         ready.value  = true;
-        status.value = { ok: true, msg: `✓ ${data.chunks} chunks embedded` };
+        status.value = { ok: true, msg: `✓ ${data.chunks} chunks indexed` };
     } catch (e) {
         const msg = e instanceof ApiError && e.status === 429
             ? '⏳ Rate limit reached — please wait a moment and try again.'
@@ -105,10 +105,9 @@ async function runQuery() {
         <div class="mx-auto max-w-3xl px-6 py-10">
             <h1 class="text-2xl font-bold mb-1">RAG AI Agent — PDF Q&amp;A</h1>
             <p class="text-sm text-gray-400 mb-8 leading-relaxed">
-                Upload any PDF. Text is chunked → embedded with
-                <code class="text-violet-400">text-embedding-3-small</code> → stored in a
-                server-side vector store. Queries retrieve the top-4 chunks via cosine similarity
-                and pass them as grounded context to <code class="text-violet-400">gpt-4o-mini</code>.
+                Upload any PDF. Text is chunked and indexed server-side using TF-IDF. Queries
+                rank chunks by relevance locally (no extra API call), then pass the top results
+                as grounded context to <code class="text-violet-400">gpt-4o-mini</code>.
             </p>
 
             <!-- Upload zone -->

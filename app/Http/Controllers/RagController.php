@@ -11,20 +11,17 @@ use Smalot\PdfParser\Parser;
 
 class RagController extends Controller
 {
-    private const CACHE_KEY    = 'rag:chunks';
-    private const CHAT_MODEL   = 'gpt-4o-mini';
-    private const CHUNK_WORDS  = 400;
-    private const CHUNK_OVERLAP= 40;
-    private const TOP_K        = 3;
-    private const MAX_ATTEMPTS = 5;
+    private const CACHE_KEY     = 'rag:chunks';
+    private const CHAT_MODEL    = 'gpt-4o-mini';
+    private const CHUNK_WORDS   = 400;
+    private const CHUNK_OVERLAP = 40;
+    private const TOP_K         = 3;
+    private const MAX_ATTEMPTS  = 5;
     private const FREE_TIER_DELAY = 21;
 
-    /**
-     * Parse the PDF and cache the plain-text chunks.
-     * No OpenAI API call needed — TF-IDF handles retrieval locally.
-     */
     public function upload(Request $request): JsonResponse
     {
+        set_time_limit(300);
         $request->validate(['pdf' => 'required|file|mimes:pdf|max:20480']);
 
         try {
@@ -47,10 +44,6 @@ class RagController extends Controller
         }
     }
 
-    /**
-     * Rank chunks with local TF-IDF (no API call), then send the top chunks
-     * as context to gpt-4o-mini — one API call total per query.
-     */
     public function query(Request $request): JsonResponse
     {
         set_time_limit(300);
@@ -82,7 +75,7 @@ class RagController extends Controller
             ]));
 
             return response()->json([
-                'answer'  => $completion->choices[0]->message->content,
+                'answer'  => $completion->choices[0]->message->content ?? '',
                 'sources' => array_map(fn ($c) => [
                     'preview' => mb_substr($c['text'], 0, 130).'…',
                     'score'   => round($c['score'], 3),
@@ -96,12 +89,6 @@ class RagController extends Controller
         }
     }
 
-    // ── Retrieval (local TF-IDF, no API) ─────────────────────────────────────
-
-    /**
-     * @param  array<int,string>  $chunks
-     * @return array<int,array{text:string,score:float}>
-     */
     private function retrieve(string $query, array $chunks): array
     {
         $queryTerms = $this->tokenize($query);
@@ -127,11 +114,10 @@ class RagController extends Controller
         return array_slice($scored, 0, self::TOP_K);
     }
 
-    /** @param array<int,string> $chunks */
     private function idf(array $chunks): array
     {
-        $n      = count($chunks);
-        $df     = [];
+        $n  = count($chunks);
+        $df = [];
 
         foreach ($chunks as $chunk) {
             foreach (array_unique($this->tokenize($chunk)) as $term) {
@@ -147,22 +133,34 @@ class RagController extends Controller
         return $idf;
     }
 
-    /** @return array<int,string> */
     private function tokenize(string $text): array
     {
         $text  = strtolower($text);
-        $text  = preg_replace('/[^a-z0-9\s]/', ' ', $text);
-        $words = preg_split('/\s+/', trim($text), -1, PREG_SPLIT_NO_EMPTY);
+        $text  = preg_replace('/[^a-z0-9\s]/', ' ', $text) ?? '';
+        $words = preg_split('/\s+/', trim($text), -1, PREG_SPLIT_NO_EMPTY) ?: [];
 
         $stopwords = ['the','a','an','and','or','but','in','on','at','to','for',
                       'of','with','by','from','is','it','this','that','was','are'];
 
-        return array_values(array_filter($words,
+        return array_values(array_filter(
+            $words,
             fn ($w) => strlen($w) > 2 && ! in_array($w, $stopwords, true)
         ));
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    private function chunkText(string $text): array
+    {
+        $words  = preg_split('/\s+/', trim($text), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+        $chunks = [];
+        $total  = count($words);
+        $step   = self::CHUNK_WORDS - self::CHUNK_OVERLAP;
+
+        for ($i = 0; $i < $total; $i += $step) {
+            $chunks[] = implode(' ', array_slice($words, $i, self::CHUNK_WORDS));
+        }
+
+        return $chunks;
+    }
 
     private function withRetry(callable $fn): mixed
     {
@@ -202,18 +200,5 @@ class RagController extends Controller
         return $retryAfter > 0
             ? "Rate limit reached. Please try again in {$retryAfter} seconds."
             : 'Rate limit reached. Please wait a moment and try again.';
-    }
-
-    private function chunkText(string $text): array
-    {
-        $words  = preg_split('/\s+/', trim($text), -1, PREG_SPLIT_NO_EMPTY);
-        $chunks = [];
-        $step   = self::CHUNK_WORDS - self::CHUNK_OVERLAP;
-
-        for ($i = 0; $i < count($words); $i += $step) {
-            $chunks[] = implode(' ', array_slice($words, $i, self::CHUNK_WORDS));
-        }
-
-        return $chunks;
     }
 }
